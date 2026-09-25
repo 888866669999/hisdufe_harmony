@@ -539,32 +539,35 @@ release 产物整理进 `release/`（含 `README.txt` 与 `SHA256SUMS.txt`），
 
 ### 构建并签名（模拟器用）
 
-真机与模拟器**必须用不同的证书**，这一点很容易踩坑：
+真机与模拟器**必须用不同的证书**：
 
 | 目标 | 证书 | 命令 |
 |---|---|---|
 | 真机（华为） | DevEco 自动签名的华为 debug profile | `hvigorw assembleHap` 后安装 `entry-default-signed.hap` |
 | 模拟器（OpenHarmony） | SDK 内置 `OpenHarmony.p12` 链 | `bash signing/emu-sign-install.sh` |
 
-模拟器脚本做七步，每一步的原因见脚本内注释：
+模拟器脚本做六步（原因见脚本内注释）：构建、取设备 UDID、生成 app 证书链、
+生成 profile 签名证书、生成并签名调试 Profile、签名并安装。
 
-1. 构建（产出未签名 HAP）
-2. 从 `OpenHarmony.p12` 导出根 CA / 子 CA（`hap-sign-tool` 要求 CA 以文件传入）
-3. 读取目标模拟器的 UDID
-4. 用 `openharmony application release` 生成 app 证书链
-5. 生成 profile 签名证书
-6. 生成调试 Profile —— 关键是把 **app.cer 的叶子证书**写进
-   `development-certificate`（`signing/make-emu-profile.mjs`），并绑定设备 UDID；
-   SDK 模板里内嵌的是另一张证书，直接用会报 9568332
-7. 签名、**先卸载再安装**（残留的旧证书应用会让 `-r` 覆盖失败）
+```bash
+OPENHARMONY_KEYSTORE_PWD=<OpenHarmony.p12 的口令> \
+  bash signing/emu-sign-install.sh 127.0.0.1:5555
+```
+
+> 口令由调用方通过环境变量传入，不写在脚本或任何文件里。
+> `OpenHarmony.p12` 随 SDK 公开分发、口令也是公开值，脚本仍要求显式传入 ——
+> 免得仓库里出现「看起来像密钥的硬编码串」，被误认为泄露。
+
+第 5 步的关键是把 **app.cer 的叶子证书**写进 `development-certificate`
+（`signing/make-emu-profile.mjs`），并绑定设备 UDID；SDK 模板里内嵌的是
+另一张证书，直接用会报 9568332。第 6 步会**先卸载再安装** ——
+残留的旧证书应用会让 `-r` 覆盖失败。
 
 产物写在 `build/emu/`，**不覆盖** `entry-default-signed.hap` ——
 后者是华为签名的真机包，被覆盖后往真机安装会静默失败。
 
-```bash
-# 完整流程
-bash signing/emu-sign-install.sh 127.0.0.1:5555
-```
+签名用的根 CA / 子 CA 直接用仓库里的 `signing/oh-root-ca.cer`
+与 `oh-sub-ca.cer`（SDK 内那两份的副本），不必每次从密钥库导出。
 
 启动模拟器（需先在 DevEco 的 Device Manager 里下载 API 20 镜像）：
 
