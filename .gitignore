@@ -1,0 +1,94 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# 原始抓取页面含真实姓名/学号/身份证号等个人信息，仅本地核对用，禁止提交。
+#
+# 注意这里**整个 testdata/ 都排除**，而不是逐个列举子目录：
+# 早先只写了 /testdata/raw，于是 testdata/fixtures 漏在外面 ——
+# 而那份里同样是从教务系统抓下来的原始页面（实测含真实身份证号与学号）。
+# 逐个列举的写法迟早会漏（漏一个就是一次真实的隐私事故），
+# 与 Flutter 端那份需要版本管理的脱敏语料是两回事（那份在另一个仓库）。
+/testdata
+
+# 实机验证截图同样含个人数据，禁止提交
+/screenshots
+
+# 测试脚本的中间产物
+/testdata/.work
+
+# ===== 签名素材：**整个目录按白名单放行** =====
+#
+# 这个目录里既有「可以公开」的（重新生成素材的脚本），
+# 也有「绝对不能公开」的（私钥 .p12、绑定设备 UDID 的 Profile）。
+# 早先是逐个列举 *.cer/*.p7b/*.pem/*.p12 —— 那种写法有两个坑：
+#   1. `*` 只匹配**当前层**，signing/huawei/app.cer 这种子目录里的漏网；
+#   2. 漏一个就是一次真实的凭据泄露（.p12 可给任意应用签名、冒充本应用发布）。
+#
+# 现在改成「先全部忽略，再只放行脚本」，这样新增素材默认是安全的 ——
+# 忘了加规则只会「该提交的没提交」，而不会「不该提交的提交了」。
+/signing/*
+
+# 放行：重新生成素材的脚本与说明（不含任何密钥）
+!/signing/*.sh
+!/signing/*.mjs
+!/signing/*.md
+# 放行：SDK 自带的 CA（公开、人人都有，不是私钥）
+!/signing/oh-root-ca.cer
+!/signing/oh-sub-ca.cer
+
+# ===== DevEco 工程配置：不入库，改提交 .example 模板 =====
+#
+# 为什么排除它：hvigor 的签名步骤**只接受绝对路径**（相对路径实测报
+# `ENOENT ... stat 'signing/huawei/material'`），所以 signingConfigs 里
+# 必然写入本机路径 —— 含 Windows 用户名与 keystore 口令。
+#
+# 而文件其余部分（products / modules / buildModeSet）是**所有人共用**的配置，
+# 因此不能整份丢掉：仓库里提交 `build-profile.json5.example`，
+# 别人 clone 后复制成 build-profile.json5 再按需填自己的签名即可。
+/build-profile.json5
+!/build-profile.json5.example
+
+# 临时构建/排查产物
+/tmp
+
+# ===== 本地整理好的发布包（HAP + 说明 + 校验文件）=====
+#
+# 发布产物走 **GitHub Releases 附件**，不进仓库 —— 与 Android 端
+# （hisdufe_flutter 的 /release/）同一处理：
+#   1. 二进制在 git 历史里是永久负担（这个 HAP 28 MB，重发几版就上百 MB，
+#      而 clone 的人全都得下下来）；
+#   2. 仓库里的文件永远停在旧版本，容易与 Releases 页上那份混淆 ——
+#      真正发给用户的应该是那边可追溯的附件。
+# 目录里同时还有 release/README.txt（给下载者的说明），它只服务于本地
+# 那一份包，同样不入库（给用户看的说明以 Releases 页正文与 README.md 为准）。
+/release
+
+# 安全扫描工具的本地状态与报告。
+#
+# 实测这些 JSON 里会**回显被扫描代码中的字符串**，其中包含真实手机号等
+# 个人信息 —— 是工具自动生成的产物，不属于源码，也不该随仓库公开。
+/.mimosa
+**/.mimosa
+
+# 编码助手的工作目录（计划文件、会话草稿等）。
+#
+# 它是编辑器/助手的工作产物，不是工程的一部分；内容也会随会话变化，
+# 提交进来只会给读代码的人添噪音。
+/.zcode
+
+# Python 字节码缓存（tools/ 下有几个本地脚本，跑一次就会生成）。
+#
+# 它会连同脚本里的**字符串常量**一起编译进去 —— 实测 .pyc 里能读出生硬的
+# 路径与用户名，属于「源码已处理、缓存却把它带出去」的典型漏法。
+__pycache__
+*.pyc

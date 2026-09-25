@@ -1,0 +1,433 @@
+/*
+ * OcrEval：OCR 识别率的端上批量评测
+ *
+ * ===== 为什么需要它 =====
+ * 「提高识别率」这句话如果不可度量，就无法判断改动是好是坏。
+ * 本 SDK 的 OCR 没有置信度，界面单看一次识别也说明不了问题 ——
+ * 因此需要一个能对**一批带真值的图片**跑完整管线并给出准确率的入口，
+ * 让「基线 vs 优化后」的比较有据可依，而不是凭感觉。
+ *
+ * ===== 语料放哪：两个来源，按顺序尝试 =====
+ * 1. **内置 rawfile**（`resources/rawfile/ocr_eval/`）—— 默认来源。
+ *    好处是 `hvigorw assembleHap` 时自动打进包，**不需要任何推送步骤**，
+ *    换台设备也能直接跑；代价是改语料要重新打包。
+ * 2. **沙箱目录**（`files/ocr_eval/`）—— 覆盖来源。
+ *    若要临时加几张而不想重新打包，可推到沙箱（注意：沙箱 `files/` 对
+ *    hdc shell 不可写，需由应用先建出 `ocr_eval` 子目录，见 `ensureDir`）。
+ *
+ * 文件名格式（两个来源一致）：
+ *
+ *     真值_序号.后缀           例如  vzpz_01.png
+ *
+ * 真值取文件名里第一个 `_` 之前的部分，因此真值本身不能含下划线。
+ */
+import { fileIo } from '@kit.CoreFileKit';
+import { image } from '@kit.ImageKit';
+import { ContextHolder } from '../common/ContextHolder';
+import { Logger } from '../common/Logger';
+import { CaptchaPrep, PrepResult } from '../model/CaptchaPrep';
+import { CaptchaVote, VariantResult } from '../model/CaptchaVote';
+import { PixelBuffer } from '../model/PixelBuffer';
+
+/** 语料目录名（rawfile 与沙箱下同名） */
+const EVAL_DIR: string = 'ocr_eval';
+
+/** 单条评测结果 */
+export class EvalItem {
+  /** 文件名 */
+  name: string = '';
+  /** 文件名给出的真值 */
+  truth: string = '';
+  /** OCR 给出的候选 */
+  got: string = '';
+  /** 是否完全一致 */
+  exact: boolean = false;
+  /** 是否包含真值（部分正确，用于看「差几位」） */
+  partial: boolean = false;
+  /** 二值化阈值 */
+  threshold: number = 0;
+  /** 失败/说明 */
+  note: string = '';
+
+  constructor(name: string, truth: string) {
+    this.name = name;
+    this.truth = truth;
+  }
+}
+
+/**
+ * 变体选型扫描的结果：每个变体各自的完全正确率。
+ *
+ * 为什么需要它：识别率该由数据决定，而不是靠猜「二值化是不是更好」。
+ * 一次扫描就能直接看出哪个（或哪几个）变体真正有用，
+ * 从而把线上默认变体定在实测最优的组合上。
+ */
+export class VariantScore {
+  variant: string = '';
+  exact: number = 0;
+  total: number = 0;
+
+  constructor(variant: string) {
+    this.variant = variant;
+  }
+
+  rate(): number {
+    return this.total === 0 ? 0 : this.exact / this.total;
+  }
+
+  line(): string {
+    const pct: number = Math.round(this.rate() * 100);
+    return this.variant + ' ' + this.exact.toString() + '/' + this.total.toString() +
+      '（' + pct.toString() + '%）';
+  }
+}
+
+/** 整批评测汇总 */
+export class EvalReport {
+  items: EvalItem[] = [];
+  /** 完全正确的数量 */
+  exact: number = 0;
+  /** 共评测多少张 */
+  total: number = 0;
+  /** 目录不存在或无图片 */
+  empty: boolean = false;
+  /** 出错说明 */
+  note: string = '';
+  /** 语料来源（内置 rawfile / 沙箱目录），便于确认评测用的是哪一批 */
+  source: string = '';
+  /** 各变体的单独成绩（仅扫描模式填充），用于选型 */
+  scores: VariantScore[] = [];
+
+  /** 准确率（0–1） */
+  rate(): number {
+    return this.total === 0 ? 0 : this.exact / this.total;
+  }
+
+  /** 给界面用的一行摘要 */
+  summary(): string {
+    if (this.empty) {
+      return this.note.length > 0 ? this.note : '未找到语料图片';
+    }
+    const pct: number = Math.round(this.rate() * 100);
+    return '完全正确 ' + this.exact.toString() + '/' + this.total.toString() +
+      '（' + pct.toString() + '%）';
+  }
+}
+
+export class OcrEval {
+  /** 语料目录的绝对路径 */
+  static dir(): string {
+    const ctx = ContextHolder.get();
+    if (ctx === null) {
+      return '';
+    }
+    return ctx.filesDir + '/' + EVAL_DIR;
+  }
+
+  /**
+   * 确保语料目录存在。
+   *
+   * 为什么要应用自己建：应用沙箱的 `files/` 目录对 hdc shell 是不可写的
+   * （属主是应用 uid），但应用通过 fileIo 建出来的子目录是可写的，
+   * 之后就能用 hdc 把语料推进去。这样语料更新无需重新打包 HAP。
+   */
+  static ensureDir(dir: string): void {
+    try {
+      if (!fileIo.accessSync(dir)) {
+        fileIo.mkdirSync(dir);
+      }
+    } catch (e) {
+      // 已存在（或并发创建）都无需处理
+    }
+  }
+
+  /**
+   * 运行整批评测。
+   *
+   * @param variantLimit 每张图跑几个变体（1 最省时，3 与线上交互路径一致）
+   * @param sweep true = 选型扫描：跑完全部候选变体，并给出每个变体的单独成绩
+   */
+  static async run(variantLimit: number, sweep: boolean = false): Promise<EvalReport> {
+    const report: EvalReport = new EvalReport();
+    const dir: string = OcrEval.dir();
+    if (dir.length === 0) {
+      report.empty = true;
+      report.note = '无法获取应用目录';
+      return report;
+    }
+
+    // 两个来源按顺序尝试：先沙箱（便于临时加样本），再内置 rawfile（默认来源）。
+    // 两边都拿不到才算失败。
+    let names: string[] = [];
+    let fromRawfile: boolean = false;
+    try {
+      OcrEval.ensureDir(dir);
+      names = fileIo.listFileSync(dir);
+    } catch (e) {
+      names = [];
+    }
+    if (OcrEval.imageNames(names).length === 0) {
+      names = OcrEval.listRawfile();
+      fromRawfile = names.length > 0;
+    }
+
+    const images: string[] = OcrEval.imageNames(names);
+    if (images.length === 0) {
+      report.empty = true;
+      report.note = '没有找到语料（检查 rawfile/' + EVAL_DIR +
+        ' 或沙箱 files/' + EVAL_DIR + '，文件名需为「真值_序号.png」）';
+      return report;
+    }
+    images.sort();
+
+    // OCR 模块动态加载：与线上路径一致，且避免在无能力设备上崩模块图。
+    // 用「先探测性 import 再取模块」两步，是为了把「模块不可用」与
+    // 「识别失败」两类错误分开报，而不是混成一条难以排查的异常。
+    try {
+      await import('./OcrProbe');
+    } catch (e) {
+      report.empty = true;
+      report.note = 'OCR 模块不可用';
+      return report;
+    }
+    const mod = await import('./OcrProbe');
+
+    for (let i = 0; i < images.length; i++) {
+      const name: string = images[i];
+      const truth: string = CaptchaVote.clean(name.substring(0, name.indexOf('_')));
+      const item: EvalItem = new EvalItem(name, truth);
+      try {
+        const bytes: ArrayBuffer = fromRawfile
+          ? OcrEval.readRawfile(EVAL_DIR + '/' + name)
+          : OcrEval.readFile(dir + '/' + name);
+        if (bytes.byteLength === 0) {
+          item.note = '读取为空';
+          report.items.push(item);
+          report.total++;
+          continue;
+        }
+        const outcome = sweep
+          ? await mod.OcrProbe.sweep(bytes)
+          : await mod.OcrProbe.recognizeCaptcha(bytes, variantLimit);
+        item.got = outcome.text;
+        item.threshold = outcome.threshold;
+        item.exact = outcome.ok && truth.length > 0 && outcome.text === truth;
+        item.partial = !item.exact && truth.length > 0 &&
+          outcome.text.length === truth.length &&
+          OcrEval.sameCount(outcome.text, truth) >= truth.length - 1;
+        if (outcome.ok && !item.exact) {
+          item.note = '识别为 ' + outcome.text;
+        } else if (!outcome.ok) {
+          item.note = outcome.reason;
+        }
+        if (sweep) {
+          // 扫描模式：把每个变体当成独立选手分别计分（不做投票），
+          // 这样才能看出「哪个变体本身更好」，而不是只看投票后的净效果。
+          OcrEval.scoreVariants(report.scores, outcome.variants, truth);
+          let line: string = '';
+          for (let v = 0; v < outcome.variants.length; v++) {
+            line = line + outcome.variants[v].variant + '=' +
+              (outcome.variants[v].candidate.length > 0 ? outcome.variants[v].candidate : '空') + ' ';
+          }
+          item.note = line;
+          // 扫描模式下 exact 表示「投票结果正确」，仍照常统计
+          item.got = outcome.text;
+        }
+      } catch (e) {
+        const err: Error = e as Error;
+        item.note = (err !== undefined && err.message !== undefined) ? err.message : '评测异常';
+      }
+      if (item.exact) {
+        report.exact++;
+      }
+      report.total++;
+      report.items.push(item);
+    }
+
+    report.source = fromRawfile ? '内置 rawfile' : '沙箱目录';
+    Logger.info('ocr eval: exact=' + report.exact.toString() + '/' + report.total.toString() +
+      ' source=' + report.source);
+    return report;
+  }
+
+  /** 把某个变体的成绩累加进计分表 */
+  private static scoreVariants(scores: VariantScore[], results: VariantResult[],
+    truth: string): void {
+    for (let i = 0; i < results.length; i++) {
+      const name: string = results[i].variant;
+      let slot: VariantScore | null = null;
+      for (let j = 0; j < scores.length; j++) {
+        if (scores[j].variant === name) {
+          slot = scores[j];
+          break;
+        }
+      }
+      if (slot === null) {
+        slot = new VariantScore(name);
+        scores.push(slot);
+      }
+      slot.total++;
+      if (truth.length > 0 && results[i].candidate === truth) {
+        slot.exact++;
+      }
+    }
+  }
+
+  /** 只保留图片、且文件名必须带真值前缀（`真值_序号.png`） */
+  private static imageNames(names: string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const n: string = names[i];
+      const low: string = n.toLowerCase();
+      if (!(low.endsWith('.png') || low.endsWith('.jpg') || low.endsWith('.jpeg'))) {
+        continue;
+      }
+      if (n.indexOf('_') <= 0) {
+        continue;
+      }
+      out.push(n);
+    }
+    return out;
+  }
+
+  /** 列出内置 rawfile 里的语料文件名 */
+  private static listRawfile(): string[] {
+    const ctx = ContextHolder.get();
+    if (ctx === null) {
+      return [];
+    }
+    try {
+      return ctx.resourceManager.getRawFileListSync(EVAL_DIR);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /** 读取内置 rawfile 里的语料 */
+  private static readRawfile(path: string): ArrayBuffer {
+    const ctx = ContextHolder.get();
+    if (ctx === null) {
+      return new ArrayBuffer(0);
+    }
+    try {
+      return ctx.resourceManager.getRawFileContentSync(path).buffer as ArrayBuffer;
+    } catch (e) {
+      return new ArrayBuffer(0);
+    }
+  }
+
+  /** 同上位置相同的字符个数（衡量「差几位」） */
+  private static sameCount(a: string, b: string): number {
+    const n: number = Math.min(a.length, b.length);
+    let same: number = 0;
+    for (let i = 0; i < n; i++) {
+      if (a.charAt(i) === b.charAt(i)) {
+        same++;
+      }
+    }
+    return same;
+  }
+
+  /** 读取文件为 ArrayBuffer */
+  private static readFile(path: string): ArrayBuffer {
+    const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+    try {
+      const stat = fileIo.statSync(path);
+      const buf: ArrayBuffer = new ArrayBuffer(stat.size);
+      const n: number = fileIo.readSync(file.fd, buf);
+      if (n < stat.size) {
+        return buf.slice(0, n);
+      }
+      return buf;
+    } finally {
+      fileIo.closeSync(file);
+    }
+  }
+
+  /**
+   * 单张自检：对**当前会话的一张真实验证码**跑完整管线，
+   * 把每个变体的候选都吐出来，便于一眼看出是哪一步失效。
+   * 与批量评测互补：批量看整体准确率，自检看单张细节。
+   */
+  static async selfTest(jpeg: ArrayBuffer): Promise<EvalItem> {
+    const item: EvalItem = new EvalItem('当前验证码', '');
+    try {
+      const mod = await import('./OcrProbe');
+      const outcome = await mod.OcrProbe.recognizeCaptcha(jpeg, 3);
+      item.got = outcome.text;
+      item.threshold = outcome.threshold;
+      let detail: string = '';
+      for (let i = 0; i < outcome.variants.length; i++) {
+        const v = outcome.variants[i];
+        if (detail.length > 0) {
+          detail = detail + ' / ';
+        }
+        detail = detail + v.variant + '=' + (v.candidate.length > 0 ? v.candidate : '空');
+      }
+      item.note = detail;
+      item.exact = outcome.ok;
+    } catch (e) {
+      const err: Error = e as Error;
+      item.note = (err !== undefined && err.message !== undefined) ? err.message : '自检异常';
+    }
+    return item;
+  }
+}
+
+/** 供自检展示：把预处理结果导成可显示的 PixelMap（便于肉眼看二值化效果） */
+export class PrepPreview {
+  /** 把 JPEG 预处理后转成 PixelMap；失败返回 null */
+  static async ofJpeg(jpeg: ArrayBuffer): Promise<image.PixelMap | null> {
+    let src: image.ImageSource | null = null;
+    let pm: image.PixelMap | null = null;
+    try {
+      src = image.createImageSource(jpeg);
+      const info: image.ImageInfo = await src.getImageInfo();
+      const w: number = info.size.width;
+      const h: number = info.size.height;
+      pm = await src.createPixelMap({
+        desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
+        editable: true
+      });
+      const stride: number = pm.getBytesNumberPerRow();
+      const total: ArrayBuffer = new ArrayBuffer(stride * h);
+      await pm.readPixelsToBuffer(total);
+      const view: Uint8Array = new Uint8Array(total);
+      const tight: Uint8Array = new Uint8Array(w * h * 4);
+      if (stride === w * 4) {
+        tight.set(view.subarray(0, w * h * 4));
+      } else {
+        for (let y = 0; y < h; y++) {
+          tight.set(view.subarray(y * stride, y * stride + w * 4), y * w * 4);
+        }
+      }
+      const prep: PrepResult = CaptchaPrep.prepare(new PixelBuffer(w, h, tight), false);
+      const rgba: Uint8Array = prep.toRgba();
+      const bm = prep.bitmap;
+      return image.createPixelMapSync(rgba.buffer as ArrayBuffer, {
+        size: { width: bm.width, height: bm.height },
+        srcPixelFormat: image.PixelMapFormat.RGBA_8888,
+        pixelFormat: image.PixelMapFormat.RGBA_8888,
+        alphaType: image.AlphaType.OPAQUE,
+        editable: false
+      });
+    } catch (e) {
+      return null;
+    } finally {
+      if (pm !== null) {
+        try {
+          pm.release();
+        } catch (e) {
+          // 忽略
+        }
+      }
+      if (src !== null) {
+        try {
+          src.release();
+        } catch (e) {
+          // 忽略
+        }
+      }
+    }
+  }
+}

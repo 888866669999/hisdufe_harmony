@@ -1,0 +1,117 @@
+// DevEco 工程配置**模板** —— 复制成 build-profile.json5 后使用。
+//
+// ===== 为什么要模板而不是直接提交原文件 =====
+// hvigor 的签名步骤**只接受绝对路径**（实测：改成相对路径会报
+// `ENOENT: no such file or directory, stat '<proj>/signing/huawei/material'`），
+// 因此 `signingConfigs` 里必然写入本机绝对路径 —— 含 Windows 用户名
+// 与 keystore 口令。这类内容不该随仓库公开，所以原文件已被 .gitignore 排除，
+// 仓库里只保留这份模板。
+//
+// ===== 怎么用 =====
+//   1) 复制：cp build-profile.json5.example build-profile.json5
+//   2) 生成签名：用 DevEco Studio 打开工程 → File → Project Structure →
+//      Signing Configs → 勾选「Automatically generate signature」，
+//      IDE 会自己把下面 material 里的路径与口令填好（推荐，不用手抄）。
+//      也可以手填：把 certpath/profile/storeFile 指向你自己的
+//      `.ohos/config/` 下那三个文件。
+//   3) 构建验证：hvigorw assembleHap --mode module -p product=default
+//
+// 注意：以下内容除 signingConfigs 外与真实工程配置**逐字一致**，
+// 因此照抄不会漏掉 products / modules 等必需项。
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          // ↓↓↓ 这三行换成你自己的绝对路径（或让 DevEco 自动生成）↓↓↓
+          "certpath": "C:\\Users\\<你的用户名>\\.ohos\\config\\<你的证书>.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "<DevEco 生成的口令>",
+          "profile": "C:\\Users\\<你的用户名>\\.ohos\\config\\<你的Profile>.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\<你的用户名>\\.ohos\\config\\<你的密钥库>.p12",
+          "storePassword": "<DevEco 生成的口令>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      },
+      {
+        // 开源发布用：**不带 signingConfig**，产出未签名 release HAP。
+        //
+        // 为什么要单独一个 product：hvigor 把签名挂在 **product** 上
+        // （`signingConfig`），没有「按 buildMode 决定签不签」的开关。
+        // 若直接删掉 default 的 signingConfig，本机就没法往真机装 ——
+        // 而那是最常用的动作。因此并列两个：
+        //   default → 本机调试（带自己的证书）
+        //   release → 给别人/给 Release 页的未签名包
+        //
+        // 构建：
+        //   hvigorw assembleHap --mode module -p product=release -p buildMode=release
+        // 产物：
+        //   entry/build/release/outputs/default/entry-default-unsigned.hap
+        "name": "release",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ],
+    "capabilities": [
+      {
+        // 包名按你自己的改（改了 bundleName 也要同步这里）
+        "bundleName": "com.sdufe.jwclient",
+        "config": [
+          {
+            "name": "Push Kit",
+            "capability": "com.huawei.service.push.base_service"
+          }
+        ]
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          // release product 复用同一个 target：两者代码与资源完全一致，
+          // 差别只在签发方式，没必要复制一份 target 配置。
+          "applyToProducts": [
+            "default",
+            "release"
+          ]
+        }
+      ]
+    }
+  ]
+}

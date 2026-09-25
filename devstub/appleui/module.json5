@@ -1,0 +1,7 @@
+{
+  "module": {
+    "name": "appleui",
+    "type": "har",
+    "deviceTypes": ["default", "tablet", "phone"]
+  }
+}

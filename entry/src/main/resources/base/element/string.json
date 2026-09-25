@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "山东财经大学强智教务系统鸿蒙客户端"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "hi山财主入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "hi山财"
+    },
+    {
+      "name": "form_today_course_name",
+      "value": "今日课程"
+    },
+    {
+      "name": "form_today_course_desc",
+      "value": "在桌面查看今天的课程与下一节课"
+    }
+  ]
+}

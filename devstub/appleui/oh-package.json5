@@ -1,0 +1,9 @@
+{
+  "name": "com.hm.appleui.hw",
+  "version": "2.1.0",
+  "description": "AppleUI 模拟器占位（仅 x86_64 布局/dpi 验证用，API 与正式包一致）",
+  "main": "Index.ets",
+  "author": "",
+  "license": "Apache-2.0",
+  "types": "Index.ets"
+}

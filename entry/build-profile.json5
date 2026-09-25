@@ -1,0 +1,48 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    // 只打 arm64-v8a 这一个 ABI。
+    //
+    // 为什么必须限制：液态玻璃库 com.hm.appleui.hw 只提供 arm64-v8a 的
+    // libliquidglass.so（其 README 明确写「当前仅提供 arm64-v8a 原生库」）。
+    // 若同时声明其它 ABI，安装到 x86_64 模拟器时会直接失败：
+    //   code:9568347 install parse native so failed. ... the Abi type supported
+    //   by the device does not match the Abi type configured in the C++ project.
+    //
+    // 后果（**已知且接受**）：本应用从此**无法安装到 x86_64 的鸿蒙模拟器**，
+    // 只能在 arm64 真机上调试。真机（MatePad 11.5 S，arm64-v8a）是主要验证目标。
+    // 要恢复模拟器调试，须先移除 AppleUI 依赖
+    // （`ohpm uninstall com.hm.appleui.hw`）并同步还原 Index.ets 里 dock 的实现。
+    "externalNativeOptions": {
+      "abiFilters": ["arm64-v8a"]
+    },
+    "resOptions": {
+      "copyCodeResource": {
+        "enable": false
+      }
+    }
+  },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false,
+            "files": [
+              "./obfuscation-rules.txt"
+            ]
+          }
+        }
+      }
+    },
+  ],
+  "targets": [
+    {
+      "name": "default"
+    },
+    {
+      "name": "ohosTest",
+    }
+  ]
+}
