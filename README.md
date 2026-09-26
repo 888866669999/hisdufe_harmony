@@ -22,9 +22,7 @@
 
 本仓库已做过开源前清洗：不含任何真实个人信息。若你要自己抓取测试语料，
 注意 `testdata/raw/` 与 `screenshots/` 会含真实姓名与学号 —— 这两个目录
-已被 `.gitignore` 排除，切勿提交。提交前可跑
-`python tools/audit_sensitive.py <目录或 hap>` 自检（脚本本身只写匹配模式、
-不含任何具体 PII）。
+已被 `.gitignore` 排除，切勿提交。
 
 ---
 
